@@ -1,11 +1,19 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DATA_FILE = path.join(__dirname, '..', 'data', 'giveaways.json');
+
 const app = express();
 const PORT = process.env.PORT || 3001;
+const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 
 // CORS configuration
 app.use(cors({
@@ -13,6 +21,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // YouTube API configuration
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
@@ -25,6 +34,33 @@ let videoCache = {
   data: null,
   lastFetched: 0
 };
+
+// Giveaway data storage
+function ensureDataDir() {
+  const dataDir = path.dirname(DATA_FILE);
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+}
+
+function getGiveawayData() {
+  ensureDataDir();
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Error reading giveaway data:', e);
+  }
+  return { content: '$0', updatedAt: null, updatedBy: null };
+}
+
+function setGiveawayData(content, updatedBy = null) {
+  ensureDataDir();
+  const data = { content, updatedAt: new Date().toISOString(), updatedBy };
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  return data;
+}
 
 /**
  * Fetch videos from a single YouTube channel
@@ -184,6 +220,42 @@ app.post('/api/refresh', async (req, res) => {
       error: 'Failed to refresh cache'
     });
   }
+});
+
+// Giveaway endpoints
+app.get('/giveaways', (req, res) => {
+  const data = getGiveawayData();
+  res.json({ content: data.content });
+});
+
+app.post('/giveaways', (req, res) => {
+  const { content } = req.body;
+  if (!content) {
+    return res.status(400).json({ error: 'content is required' });
+  }
+  const data = setGiveawayData(content, 'api');
+  res.json({ success: true, content: data.content });
+});
+
+app.post('/slack/giveaways', (req, res) => {
+  const { text, user_name } = req.body;
+  
+  if (!text || text.trim() === '') {
+    // Return current value if no text provided
+    const data = getGiveawayData();
+    return res.json({
+      response_type: 'in_channel',
+      text: `Current giveaway value: *${data.content}*`
+    });
+  }
+  
+  const newValue = text.trim();
+  const data = setGiveawayData(newValue, user_name || 'slack');
+  
+  res.json({
+    response_type: 'in_channel',
+    text: `✅ Giveaway value updated to *${data.content}* by ${user_name || 'someone'}`
+  });
 });
 
 // Start server
